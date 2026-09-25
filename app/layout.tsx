@@ -33,7 +33,8 @@ export default function RootLayout({
           </footer>
           <FeedbackWidget />
         </QuotaProvider>
-        <Analytics />
+        {/* Vercel 专属：仅当显式开启时加载，避免其他平台（EdgeOne 等）请求 404 脚本 */}
+        {process.env.NEXT_PUBLIC_VERCEL_ANALYTICS === "1" && <Analytics />}
       </body>
     </html>
   );
