@@ -77,7 +77,7 @@ git push -u origin main
 
 1. 打开 https://vercel.com/new ，点 "Import Git Repository" 选中刚才的仓库
 2. 框架会自动识别为 Next.js，**不用改任何构建配置**，直接点 Deploy
-3. 等约 2 分钟，得到公开访问链接（形如 `tuke-workshop.vercel.app`）
+3. 等约 2 分钟，得到公开访问链接（形如 `<项目名>.vercel.app`）
 4. **关键**：进入项目 → Settings → Environment Variables，添加 `AI_API_KEY` 和 `AI_API_BASE` 两个变量（值与 `.env.local` 相同），然后 Deployments → 最新一条 → Redeploy
 
 至此网站上线。以后改了代码，只要 `git push`，Vercel 自动重新部署。

@@ -2,13 +2,13 @@
 
 ## 线上地址
 
-**https://image-tool.edgeone.cool** （腾讯 EdgeOne 全球节点，大陆直连可访问）
+**https://<你的项目名>.edgeone.app** （腾讯 EdgeOne 全球节点，大陆直连可访问）
 
 - 控制台：https://console.tencentcloud.com/edgeone/pages/project/makers-qffi9nltxm3s
 - 账号：EdgeOne 国际站（edgeone.ai，邮箱注册）
 - 环境变量（Production）：`AI_API_KEY`、`AI_API_BASE`（佐糖 Key，控制台已配置）
 
-> 备用海外线路：https://image-tool-five-black.vercel.app （Vercel，大陆访问不稳定）
+> 备用海外线路：https://<你的项目名>.vercel.app （Vercel，大陆访问不稳定）
 
 ## 架构说明
 
