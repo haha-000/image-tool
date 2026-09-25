@@ -27,3 +27,14 @@ next-env.d.ts
 
 .vercel
 .env*
+
+# Tencent Cloud EdgeOne
+.env
+.edgeone/*
+.tef_dist/*
+  
+# EdgeOne 本地构建残留
+.eo-build-*
+/edgeone-dist/
+/edgeone-publish/
+.edgeone-build/
