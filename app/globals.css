@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+/* ── 图客工坊 设计系统 ──────────────────────────────
+   原则：暖白纸感 + 墨黑 + 翡翠绿单一强调色。
+   干净、留白、克制。不用蓝紫渐变、不堆 emoji、不堆毛玻璃。
+─────────────────────────────────────────────────── */
+@theme {
+  --color-bg: #fafaf7;
+  --color-surface: #ffffff;
+  --color-surface-2: #f4f4ee;
+  --color-ink: #1c1c18;
+  --color-ink-2: #6e6e64;
+  --color-ink-3: #a6a699;
+  --color-line: #e8e8df;
+  --color-line-strong: #d8d8cb;
+  --color-accent: #0e7a5f;
+  --color-accent-strong: #0a5c47;
+  --color-accent-soft: #eaf3ef;
+  --color-amber: #b45309;
+  --color-amber-soft: #faf1e3;
+  --color-danger: #b42318;
+  --color-danger-soft: #fbeeec;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+/* 数字等宽：体积、比例等数据展示 */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 透明背景棋盘格：抠图 / 转换结果预览 */
+.checkerboard {
+  background-image:
+    linear-gradient(45deg, #ecece3 25%, transparent 25%),
+    linear-gradient(-45deg, #ecece3 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #ecece3 75%),
+    linear-gradient(-45deg, transparent 75%, #ecece3 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-color: #fff;
+}
+
+/* 涂抹画布：指针涂抹，禁用触摸滚动 */
+.brush-canvas {
+  cursor: crosshair;
+  touch-action: none;
+}
+
+/* 小区域滚动条 */
+.slim-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.slim-scroll::-webkit-scrollbar-thumb {
+  background: var(--color-line-strong);
+  border-radius: 3px;
+}

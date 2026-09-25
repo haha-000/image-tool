@@ -1,0 +1,26 @@
+# 依赖与构建产物
+/node_modules
+/.next/
+/out/
+/build
+
+# 系统文件
+.DS_Store
+*.pem
+
+# 日志
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# 环境变量（含 API Key，绝对不能进仓库）
+.env
+.env*.local
+
+# 部署
+.vercel
+
+# TS
+*.tsbuildinfo
+next-env.d.ts
