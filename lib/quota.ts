@@ -1,9 +1,12 @@
 /**
- * 额度管理（MVP：LocalStorage 按日重置）
+ * 额度管理（MVP：LocalStorage 按日重置，按账号隔离）
  * - 每天免费 3 次 AI 处理（去水印 / 抠图），次日零点自动重置
  * - 免费次数用完后消耗充值积分
  * - 体验会员有效期内每天额外发放 10 积分
+ * - Key 按登录 UID 隔离：多账号互不串数据
  */
+
+import { getCachedUser } from "@/lib/auth";
 
 export const DAILY_FREE_LIMIT = 3;
 export const MEMBER_DAILY_CREDITS = 10;
@@ -16,8 +19,14 @@ export interface QuotaState {
   memberGrantedDate: string | null; // 会员每日积分最近一次发放日期
 }
 
-const STORAGE_KEY = "tuke-quota-v1";
+const STORAGE_KEY_BASE = "tuke-quota-v1";
 export const QUOTA_EVENT = "tuke-quota-change";
+
+/** 按登录用户隔离额度 Key（匿名兜底，理论上不会走到） */
+function storageKey(): string {
+  const uid = getCachedUser()?.uid;
+  return uid ? `${STORAGE_KEY_BASE}:${uid}` : `${STORAGE_KEY_BASE}:anon`;
+}
 
 function todayStr(): string {
   const d = new Date();
@@ -41,7 +50,7 @@ export function loadQuota(): QuotaState {
 
   let state: QuotaState;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey());
     state = raw ? { ...defaultState(), ...JSON.parse(raw) } : defaultState();
   } catch {
     state = defaultState();
@@ -69,7 +78,7 @@ export function loadQuota(): QuotaState {
 
 export function saveQuota(state: QuotaState): void {
   if (typeof window === "undefined") return;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  localStorage.setItem(storageKey(), JSON.stringify(state));
   window.dispatchEvent(new CustomEvent(QUOTA_EVENT));
 }
 

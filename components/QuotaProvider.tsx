@@ -32,7 +32,11 @@ export function QuotaProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     refresh();
     window.addEventListener(QUOTA_EVENT, refresh);
-    return () => window.removeEventListener(QUOTA_EVENT, refresh);
+    window.addEventListener("tuke-auth-change", refresh); // 登录态变化 → 切换到对应账号的额度
+    return () => {
+      window.removeEventListener(QUOTA_EVENT, refresh);
+      window.removeEventListener("tuke-auth-change", refresh);
+    };
   }, [refresh]);
 
   return <QuotaContext.Provider value={{ quota, refresh }}>{children}</QuotaContext.Provider>;

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Analytics } from "@vercel/analytics/next";
 import "./globals.css";
 import { QuotaProvider } from "@/components/QuotaProvider";
+import { AuthProvider } from "@/components/AuthProvider";
 import Navbar from "@/components/Navbar";
 import FeedbackWidget from "@/components/FeedbackWidget";
 
@@ -23,6 +24,7 @@ export default function RootLayout({
     <html lang="zh-CN">
       <body className="min-h-screen font-sans">
         <QuotaProvider>
+          <AuthProvider>
           <Navbar />
           <main className="mx-auto max-w-5xl px-6 pb-24">{children}</main>
           <footer className="border-t border-line">
@@ -32,6 +34,7 @@ export default function RootLayout({
             </div>
           </footer>
           <FeedbackWidget />
+        </AuthProvider>
         </QuotaProvider>
         {/* Vercel 专属：仅当显式开启时加载，避免其他平台（EdgeOne 等）请求 404 脚本 */}
         {process.env.NEXT_PUBLIC_VERCEL_ANALYTICS === "1" && <Analytics />}

@@ -15,9 +15,11 @@ import { requestAi, AiError } from "@/lib/ai-client";
 import { tryConsume, refundLast } from "@/lib/quota";
 import { downloadDataUrl, formatBytes, outputName } from "@/lib/image";
 import { track } from "@/lib/track";
+import { useAuth } from "@/components/AuthProvider";
 import { Download, Loader2, RotateCcw, Sparkles } from "lucide-react";
 
 export default function WatermarkPage() {
+  const { user, openLogin } = useAuth();
   const [file, setFile] = useState<File | null>(null);
   const [srcUrl, setSrcUrl] = useState<string>("");
   const objectUrlRef = useRef<string>("");
@@ -73,6 +75,13 @@ export default function WatermarkPage() {
   /* ── 提交 AI 处理 ── */
   const run = async () => {
     if (!file || busy) return;
+
+    /* 登录门槛：AI 功能消耗算粒，额度必须绑定账号（防刷、可追溯、可充值） */
+    if (!user) {
+      track("auth_required", { tool: "watermark" });
+      openLogin("AI 去水印需登录后使用 — 注册即领每日免费额度，额度与记录随账号保存", run);
+      return;
+    }
 
     if (!tryConsume().ok) {
       setPaywall(true);
@@ -225,6 +234,11 @@ export default function WatermarkPage() {
                 )}
                 {busy ? STAGE_TEXT[stage] : "一键 AI 去水印（消耗 1 次额度）"}
               </button>
+              {!user && (
+                <span className="self-center text-xs text-ink-3">
+                  使用 AI 功能需先登录（每日免费 3 次）
+                </span>
+              )}
               <button
                 onClick={reset}
                 disabled={busy}

@@ -11,6 +11,7 @@ import { useEffect, useState } from "react";
 import { Coins, Crown, X } from "lucide-react";
 import { activateMember, grantCredits } from "@/lib/quota";
 import { track } from "@/lib/track";
+import { useAuth } from "@/components/AuthProvider";
 
 interface PaywallModalProps {
   open: boolean;
@@ -40,6 +41,7 @@ const PLANS = [
 
 export default function PaywallModal({ open, onClose, onFreeDownload }: PaywallModalProps) {
   const [paid, setPaid] = useState(false);
+  const { user, openLogin } = useAuth();
 
   // 运营埋点：付费弹窗曝光（转化漏斗起点）与模拟充值行为
   useEffect(() => {
@@ -49,6 +51,14 @@ export default function PaywallModal({ open, onClose, onFreeDownload }: PaywallM
   if (!open) return null;
 
   const handleChoose = (plan: (typeof PLANS)[number]) => {
+    /* 充值资产（积分/会员）必须属于账号：未登录先拉起登录，成功后回到本弹窗 */
+    if (!user) {
+      track("paywall_auth_required", { plan: plan.id });
+      openLogin("充值前请先登录 — 积分与会员将绑定到你的账号，换设备也能使用", () =>
+        setPaid(false)
+      );
+      return;
+    }
     track("recharge_sim", { plan: plan.id, price: plan.price });
     // MVP：模拟「客服确认到账 → 后台加额度」。正式接入支付后删除本段，改为拉起支付。
     plan.grant();
@@ -79,6 +89,7 @@ export default function PaywallModal({ open, onClose, onFreeDownload }: PaywallM
           <>
             <p className="mt-1.5 text-sm text-ink-2">
               充值积分继续处理，压缩与格式转换仍然完全免费。
+              {!user && <span className="text-accent-strong">（充值需先登录账号）</span>}
             </p>
 
             <div className="mt-5 grid gap-3">

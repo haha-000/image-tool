@@ -14,9 +14,11 @@ import { requestAi, AiError } from "@/lib/ai-client";
 import { tryConsume, refundLast } from "@/lib/quota";
 import { downloadDataUrl, formatBytes, outputName } from "@/lib/image";
 import { track } from "@/lib/track";
+import { useAuth } from "@/components/AuthProvider";
 import { Download, Loader2, RotateCcw } from "lucide-react";
 
 export default function MattingPage() {
+  const { user, openLogin } = useAuth();
   const [file, setFile] = useState<File | null>(null);
   const [srcUrl, setSrcUrl] = useState<string>("");
   const objectUrlRef = useRef<string>("");
@@ -58,6 +60,13 @@ export default function MattingPage() {
 
   const run = async () => {
     if (!file) return;
+
+    /* 登录门槛：AI 功能消耗算粒，额度必须绑定账号（防刷、可追溯、可充值） */
+    if (!user) {
+      track("auth_required", { tool: "matting" });
+      openLogin("AI 抠图需登录后使用 — 注册即领每日免费额度，额度与记录随账号保存", run);
+      return;
+    }
 
     // 额度检查：不足则弹付费引导
     if (!tryConsume().ok) {
@@ -161,6 +170,11 @@ export default function MattingPage() {
                 {busy ? <Loader2 className="size-4 animate-spin" /> : null}
                 {busy ? STAGE_TEXT[stage] : "开始 AI 抠图（消耗 1 次额度）"}
               </button>
+              {!user && (
+                <span className="self-center text-xs text-ink-3">
+                  使用 AI 功能需先登录（每日免费 3 次）
+                </span>
+              )}
               <button
                 onClick={reset}
                 className="flex items-center gap-1.5 rounded-lg border border-line-strong px-4 py-2.5 text-sm transition-colors hover:border-accent hover:text-accent-strong"

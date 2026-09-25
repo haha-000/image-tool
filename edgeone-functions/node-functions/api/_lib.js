@@ -11,20 +11,27 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 
 export const kvEnabled = () => Boolean(KV_URL && KV_TOKEN);
 
-async function kvRaw(body) {
-  const r = await fetch(KV_URL, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${KV_TOKEN}` },
-    body: JSON.stringify(body),
-    cache: "no-store",
-  });
-  if (!r.ok) return null;
-  const j = await r.json();
-  return j.result ?? null;
+async function kvRaw(body, path = "") {
+  try {
+    const r = await fetch(KV_URL + path, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${KV_TOKEN}` },
+      body: JSON.stringify(body),
+      cache: "no-store",
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    /* 单命令端点返回 {"result":...}；/pipeline 返回裸数组 [{result:...},...] — 形态不同！ */
+    if (path === "/pipeline") return Array.isArray(j) ? j : null;
+    return j.result ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export const kv = (cmd) => (kvEnabled() ? kvRaw(cmd) : null);
-export const kvPipe = (cmds) => (kvEnabled() ? kvRaw(cmds) : null);
+/* pipeline 必须打 /pipeline 子路径：单命令端点不接受嵌套数组（会 400） */
+export const kvPipe = (cmds) => (kvEnabled() ? kvRaw(cmds, "/pipeline") : null);
 export const adminTokenOk = (t) => Boolean(ADMIN_TOKEN) && t === ADMIN_TOKEN;
 
 /* ── auth ── */
@@ -51,20 +58,20 @@ export async function registerUser(emailRaw, passwordRaw, ip) {
   const now = new Date().toISOString();
   const record = { uid, email, ph: hashPw(password, salt), salt, createdAt: now, lastLoginAt: now, regIp: ip };
 
+  // 单条 pipeline 完成全部写入（含会话），任何失败都不得谎报成功
+  const token = randomBytes(24).toString("hex");
   const created = await kvPipe([
     ["SET", `u:email:${email}`, uid, "NX"],
     ["SET", `u:${uid}`, JSON.stringify(record)],
     ["SADD", "users", uid],
-  ]);
-  if (created && created[0] && created[0].result === null) {
-    return { ok: false, status: 409, error: "该邮箱已注册" };
-  }
-
-  const token = randomBytes(24).toString("hex");
-  await kvPipe([
     ["SET", `s:${token}`, uid, "EX", SESSION_TTL_SEC],
     ["HINCRBY", "stats", "users_total", 1],
   ]);
+  if (!created) return { ok: false, status: 503, error: "数据库暂不可用，请稍后再试" };
+  if (created[0] && created[0].result === null) {
+    return { ok: false, status: 409, error: "该邮箱已注册" };
+  }
+
   console.log(JSON.stringify({ t: "auth_register", uid, email, ip, ts: now }));
   return { ok: true, status: 201, uid, email, token };
 }
@@ -92,10 +99,12 @@ export async function loginUser(emailRaw, passwordRaw, ip) {
 
   const token = randomBytes(24).toString("hex");
   const now = new Date().toISOString();
-  await kvPipe([
+  const ok = await kvPipe([
     ["SET", `s:${token}`, uid, "EX", SESSION_TTL_SEC],
     ["SET", `u:${uid}`, JSON.stringify({ ...user, lastLoginAt: now })],
   ]);
+  if (!ok) return { ok: false, status: 503, error: "数据库暂不可用，请稍后再试" };
+
   console.log(JSON.stringify({ t: "auth_login", uid, email, ip, ts: now }));
   return { ok: true, status: 200, uid, email, token };
 }

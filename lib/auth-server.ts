@@ -80,21 +80,20 @@ export async function register(
     regIp: ip,
   };
 
+  // 单条 pipeline 完成全部写入（含会话），任何失败都不得谎报成功
+  const token = randomBytes(24).toString("hex");
   const created = await kvPipe([
     ["SET", `u:email:${email}`, uid, "NX"], // NX：并发注册防重复
     ["SET", `u:${uid}`, JSON.stringify(record)],
     ["SADD", "users", uid],
-  ]);
-  // NX 失败 = 并发下被别人抢注
-  if (created && (created[0] as { result?: unknown })?.result === null) {
-    return { ok: false, status: 409, error: "该邮箱已注册" };
-  }
-
-  const token = randomBytes(24).toString("hex");
-  await kvPipe([
     ["SET", `s:${token}`, uid, "EX", SESSION_TTL_SEC],
     ["HINCRBY", "stats", "users_total", 1],
   ]);
+  if (!created) return { ok: false, status: 503, error: "数据库暂不可用，请稍后再试" };
+  // NX 失败 = 并发下被别人抢注
+  if ((created[0] as { result?: unknown })?.result === null) {
+    return { ok: false, status: 409, error: "该邮箱已注册" };
+  }
 
   console.log(JSON.stringify({ t: "auth_register", uid, email, ip, ts: now }));
   return { ok: true, status: 201, uid, email, token };
@@ -130,10 +129,11 @@ export async function login(
 
   const token = randomBytes(24).toString("hex");
   const now = new Date().toISOString();
-  await kvPipe([
+  const ok = await kvPipe([
     ["SET", `s:${token}`, uid, "EX", SESSION_TTL_SEC],
     ["SET", `u:${uid}`, JSON.stringify({ ...user, lastLoginAt: now })],
   ]);
+  if (!ok) return { ok: false, status: 503, error: "数据库暂不可用，请稍后再试" };
 
   console.log(JSON.stringify({ t: "auth_login", uid, email, ip, ts: now }));
   return { ok: true, status: 200, uid, email, token };

@@ -39,18 +39,20 @@ export async function kv(cmd: (string | number)[]): Promise<unknown | null> {
   }
 }
 
-/** 批量执行（pipeline，只算一次网络往返） */
+/** 批量执行（pipeline）。注意：必须打 /pipeline 子路径，单命令端点不接受嵌套数组 */
 export async function kvPipe(cmds: (string | number)[][]): Promise<unknown[] | null> {
   if (!kvEnabled()) return null;
   try {
-    const r = await fetch(URL_ENV, {
+    const r = await fetch(`${URL_ENV}/pipeline`, {
       method: "POST",
       headers: { Authorization: `Bearer ${TOKEN_ENV}` },
       body: JSON.stringify(cmds),
       cache: "no-store",
     });
     if (!r.ok) return null;
-    const j = (await r.json()) as { result?: unknown[] };
+    const j = (await r.json()) as { result?: unknown[] } | unknown[];
+    /* /pipeline 返回裸数组 [{result:...},...]；单命令端点返回 {"result":...} — 形态不同！ */
+    if (Array.isArray(j)) return j;
     return j.result ?? null;
   } catch {
     return null;
