@@ -32,7 +32,14 @@ const POLL_BUDGET_MS = 180_000; // 全屏去水印官方示例 53s，留足余�
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function requestAi(action: AiAction, body: FormData): Promise<AiResponse> {
-  const headers = { "x-user-id": getUserId() };
+  const headers: Record<string, string> = { "x-user-id": getUserId() };
+  // 登录用户附带会话 token，服务端把任务事件关联到 uid 主键
+  try {
+    const t = localStorage.getItem("tuke-token-v1");
+    if (t) headers["x-auth-token"] = t;
+  } catch {
+    /* 无 localStorage 环境忽略 */
+  }
 
   /* ── 1. 创建任务 ── */
   const createRes = await fetch(`/api/ai/${action}`, { method: "POST", body, headers });

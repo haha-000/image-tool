@@ -7,6 +7,7 @@ import { usePathname } from "next/navigation";
 import { Coins } from "lucide-react";
 import { useQuota } from "@/components/QuotaProvider";
 import { DAILY_FREE_LIMIT, remainingToday } from "@/lib/quota";
+import AuthWidget from "@/components/AuthWidget";
 
 const TOOLS = [
   { href: "/compress", label: "压缩" },
@@ -67,6 +68,8 @@ export default function Navbar() {
           )}
           {isMember && <span className="text-accent">· 会员</span>}
         </div>
+
+        <AuthWidget />
       </div>
     </header>
   );

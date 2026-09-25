@@ -74,3 +74,57 @@ Vercel → 项目 → Logs，过滤关键字后按时间范围统计：
 ## 6. 改动记录
 
 - 2026-09-25 v2：去水印切换佐糖「全屏去水印-高级」API（自动识别，无需涂抹）；AI 代理改两段式任务架构（长任务不再超时）；新增运营埋点 /api/track、投诉通道 /api/feedback、匿名用户 ID、Vercel Analytics
+
+---
+
+## 6. 用户账号体系与数据分析（v2 升级）
+
+网站已支持**邮箱+密码注册登录**（导航栏右上角），每个用户有唯一主键：
+
+- **UID**：形如 `u_3f9a2b8c1d4e5f6a`，注册时生成，永不变化
+- **邮箱**：可回访联系的主键；UID 与邮箱在数据库里双向绑定
+
+### 数据存储：Upstash Redis（免费 1 万命令/天）
+
+配置后（未配置则自动降级为纯日志模式，功能不受影响），所有数据自动落库：
+
+| 数据 | 存储键 | 用途 |
+|---|---|---|
+| 用户档案（uid/邮箱/注册IP/时间） | `u:{uid}` | 用户名录、回访 |
+| 邮箱→UID 映射 | `u:email:{email}` | 邮箱查人 |
+| 会话（30 天） | `s:{token}` | 登录态 |
+| 全局事件流 | `ev`（按时间排序） | 全量行为分析 |
+| 单用户行为轨迹（最近 200 条） | `ue:{uid}` | 任意用户的原子化行为还原 |
+| 每日活跃用户集合 | `dau:{日期}` | DAU |
+| 事件分类计数 | `stats` | 总任务数/失败数/反馈数 |
+| 反馈列表（最近 500 条） | `feedback` | 投诉通道 |
+
+### 运营看板 API（配置 ADMIN_TOKEN 后可用）
+
+```bash
+# 全局概览：用户总数、DAU、24h 事件分类、最近 7 天活跃、最近反馈
+curl "https://你的域名/api/admin/stats?token=你的ADMIN_TOKEN"
+
+# 查单个用户（原子化辨识）：注册信息 + 最近 50 条行为轨迹
+curl "https://你的域名/api/admin/stats?token=xxx&email=user@example.com"
+curl "https://你的域名/api/admin/stats?token=xxx&uid=u_xxxxxxxx"
+```
+
+概览返回示例：
+
+```json
+{
+  "totals": { "users": 128, "events": 3400, "feedback": 12 },
+  "today": { "activeUsers": 45, "events24h": 320, "activeUids24h": 38 },
+  "events24hByType": { "ai_task_done": 87, "ai_task_fail": 3, "download": 65, "paywall_open": 21 },
+  "dailyActiveLast7d": { "2026-09-20": 33, "2026-09-21": 41 },
+  "recentFeedback": [ { "message": "…", "contact": "…", "uid": "u_xxx" } ]
+}
+```
+
+`events24hByType` 里的 `ai_task_create` / `ai_task_done` / `ai_task_fail` 即 24 小时任务数与失败数；
+单用户轨迹里可看到该用户用过哪些工具、何时触发付费弹窗、下载了什么——推广转化的完整漏斗。
+
+### Vercel 与 EdgeOne 双线数据互通
+
+两条线路的 API 写的是同一个 Upstash 数据库，用户在任一线路注册/操作，数据都汇总到一处。

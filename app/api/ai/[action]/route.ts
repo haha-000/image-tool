@@ -21,6 +21,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { verifySession, recordEvent } from "@/lib/auth-server";
+import { kvEnabled } from "@/lib/upstash";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -60,12 +62,38 @@ function clientIp(req: NextRequest): string {
   );
 }
 
-/** 结构化运营日志：Vercel 控制台按 "ai_task" / "ai_task_fail" 过滤即可统计 */
+/** 结构化运营日志：Vercel 控制台按 "ai_task" / "ai_task_fail" 过滤即可统计；KV 配置时同步落库（关联 uid 主键） */
 function opsLog(
   event: string,
   fields: Record<string, string | number | undefined | null>
 ) {
   console.log(JSON.stringify({ t: event, ts: new Date().toISOString(), ...fields }));
+  if (kvEnabled() && (event === "ai_task_create" || event === "ai_task_done" || event === "ai_task_fail")) {
+    // fire-and-forget：落库失败不影响响应
+    resolveUidAndRecord(event, fields).catch(() => {});
+  }
+}
+
+/** token → uid，把 AI 任务事件写入全局流 + 单用户轨迹 */
+async function resolveUidAndRecord(
+  event: string,
+  fields: Record<string, string | number | undefined | null>
+): Promise<void> {
+  const token = String(fields.token || "") || null;
+  const user = token ? await verifySession(token) : null;
+  const props: Record<string, string | number | boolean> = {};
+  for (const [k, v] of Object.entries(fields)) {
+    if (k === "token" || k === "ip") continue;
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") props[k] = v;
+  }
+  await recordEvent({
+    event,
+    uid: user?.uid,
+    anonId: user ? undefined : String(fields.userId || "anon").slice(0, 64),
+    ip: String(fields.ip || "unknown"),
+    ua: "ai-api",
+    props,
+  });
 }
 
 /** 裸 base64 → dataURL（按魔数嗅探真实 MIME，避免下载扩展名与内容不符） */
@@ -143,6 +171,7 @@ export async function POST(
   }
 
   const userId = req.headers.get("x-user-id") || "anon";
+  const authToken = req.headers.get("x-auth-token");
 
   /* 映射为佐糖字段：去水印走全屏自动识别（无 mask），抠图要透明 PNG */
   const upstream = new FormData();
@@ -186,7 +215,7 @@ export async function POST(
       return busy();
     }
 
-    opsLog("ai_task_create", { action, userId, ip, taskId });
+    opsLog("ai_task_create", { action, userId, ip, taskId, token: authToken });
     return NextResponse.json({ taskId });
   } catch (err) {
     console.error(`[ai/${action}] create error:`, err instanceof Error ? err.message : err);
@@ -220,6 +249,7 @@ export async function GET(
     return NextResponse.json({ error: "缺少 taskId" }, { status: 400 });
   }
   const userId = req.headers.get("x-user-id") || "anon";
+  const authToken = req.headers.get("x-auth-token");
 
   const pollPath = `${TASKS[action].createPath}/${taskId}`;
   let poll: {
@@ -260,6 +290,7 @@ export async function GET(
         action,
         userId,
         taskId,
+        token: authToken,
         usePoint: poll?.data?.use_point,
         secs: poll?.data?.time_elapsed,
       });
@@ -271,7 +302,7 @@ export async function GET(
   }
 
   if (typeof state === "number" && state < 0) {
-    opsLog("ai_task_fail", { action, userId, taskId, state, msg: poll?.message });
+    opsLog("ai_task_fail", { action, userId, taskId, token: authToken, state, msg: poll?.message });
     // -7 = 无效图片；-14 = 内容不符合要求；其余为上游处理失败
     const msg =
       state === -7 || state === -14

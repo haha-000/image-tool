@@ -1,12 +1,13 @@
 /**
- * 用户反馈 / 投诉通道（零数据库 MVP 版）
+ * 用户反馈 / 投诉通道
  *
- * 反馈内容（含联系方式）以结构化 JSON 写入服务端日志，
- * Vercel 控制台按 "feedback" 过滤即可查看和回访用户。
- * MVP 验证后：换成数据库表 + 管理后台，或接邮件通知（Resend）。
+ * 落地：Upstash KV（feedback 列表，保留最近 500 条）+ 结构化日志。
+ * 登录用户的反馈自动关联 uid，可直接回访。
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { verifySession, recordFeedback } from "@/lib/auth-server";
+import { kvEnabled } from "@/lib/upstash";
 
 export const runtime = "nodejs";
 
@@ -28,17 +29,21 @@ export async function POST(req: NextRequest) {
     req.headers.get("x-real-ip") ||
     "unknown";
 
-  console.log(
-    JSON.stringify({
-      t: "feedback",
-      ts: new Date().toISOString(),
-      userId: String(body.userId || "anon").slice(0, 64),
-      page: String(body.page || "").slice(0, 200),
-      contact: String(body.contact || "").slice(0, 100) || null,
-      ip,
-      message,
-    })
-  );
+  let uid: string | undefined;
+  if (kvEnabled()) {
+    const user = await verifySession(req.headers.get("x-auth-token"));
+    if (user) uid = user.uid;
+  }
+  const anonId = uid ? undefined : String(body.userId || "anon").slice(0, 64);
+  const contact = String(body.contact || "").slice(0, 100);
+
+  if (kvEnabled()) {
+    await recordFeedback({ uid, anonId, message, contact, page: String(body.page || ""), ip });
+  } else {
+    console.log(
+      JSON.stringify({ t: "feedback", ts: new Date().toISOString(), anonId, uid: uid || null, contact: contact || null, ip, message })
+    );
+  }
 
   return NextResponse.json({ ok: true });
 }

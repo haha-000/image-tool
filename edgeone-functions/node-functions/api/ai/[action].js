@@ -9,6 +9,8 @@
  * 环境变量：EdgeOne 控制台配置（AI_API_KEY / AI_API_BASE），通过 context.env 读取
  */
 
+import { verifySession, recordEvent, kvEnabled } from "../_lib.js";
+
 const ALLOWED_ACTIONS = new Set(["watermark", "matting"]);
 
 const TASKS = {
@@ -45,6 +47,27 @@ function clientIp(request) {
 
 function opsLog(event, fields) {
   console.log(JSON.stringify({ t: event, ts: new Date().toISOString(), ...fields }));
+  // AI 任务事件同步落库（关联登录用户 uid 主键），失败不影响响应
+  if (kvEnabled() && (event === "ai_task_create" || event === "ai_task_done" || event === "ai_task_fail")) {
+    resolveUidAndRecord(event, fields).catch(() => {});
+  }
+}
+
+async function resolveUidAndRecord(event, fields) {
+  const user = fields.token ? await verifySession(fields.token) : null;
+  const props = {};
+  for (const [k, v] of Object.entries(fields)) {
+    if (k === "token" || k === "ip") continue;
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") props[k] = v;
+  }
+  await recordEvent({
+    event,
+    uid: user ? user.uid : undefined,
+    anonId: user ? undefined : String(fields.userId || "anon").slice(0, 64),
+    ip: String(fields.ip || "unknown"),
+    ua: "ai-api",
+    props,
+  });
 }
 
 function base64ToDataUrl(field) {
@@ -107,6 +130,7 @@ export async function onRequestPost(context) {
     return json({ error: "图片过大（上限 20MB），请先在本站压缩后再试" }, 413);
 
   const userId = request.headers.get("x-user-id") || "anon";
+  const authToken = request.headers.get("x-auth-token");
 
   const upstream = new FormData();
   upstream.append("image_file", image, image.name || "image.png");
@@ -139,7 +163,7 @@ export async function onRequestPost(context) {
       return busy();
     }
 
-    opsLog("ai_task_create", { action, userId, ip, taskId });
+    opsLog("ai_task_create", { action, userId, ip, taskId, token: authToken });
     return json({ taskId });
   } catch (err) {
     console.error(`[ai/${action}] create error:`, err?.message || err);
@@ -162,6 +186,7 @@ export async function onRequestGet(context) {
   const taskId = new URL(request.url).searchParams.get("taskId");
   if (!taskId) return json({ error: "缺少 taskId" }, 400);
   const userId = request.headers.get("x-user-id") || "anon";
+  const authToken = request.headers.get("x-auth-token");
 
   let poll;
   try {
@@ -186,7 +211,7 @@ export async function onRequestGet(context) {
     try {
       const image = await toDataUrl(imageField);
       opsLog("ai_task_done", {
-        action, userId, taskId,
+        action, userId, taskId, token: authToken,
         usePoint: poll?.data?.use_point,
         secs: poll?.data?.time_elapsed,
       });
@@ -198,7 +223,7 @@ export async function onRequestGet(context) {
   }
 
   if (typeof state === "number" && state < 0) {
-    opsLog("ai_task_fail", { action, userId, taskId, state, msg: poll?.message });
+    opsLog("ai_task_fail", { action, userId, taskId, token: authToken, state, msg: poll?.message });
     const msg = state === -7 || state === -14 ? "图片无法识别，请更换图片后重试" : undefined;
     return busy(msg);
   }

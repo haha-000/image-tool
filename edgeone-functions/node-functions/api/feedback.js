@@ -1,7 +1,9 @@
 /**
- * 用户反馈/投诉通道 — EdgeOne Node Functions 移植版（node-functions/api/feedback.js → POST /api/feedback）
- * 反馈内容（含联系方式）写入函数日志，EdgeOne 控制台按 "feedback" 过滤查看和回访。
+ * 用户反馈/投诉通道 — EdgeOne Node Functions 版（POST /api/feedback）
+ * KV 配置时存 feedback 列表（关联 uid），否则降级日志。
  */
+
+import { verifySession, recordFeedback, kvEnabled, json, clientIp } from "./_lib.js";
 
 export async function onRequestPost(context) {
   const { request } = context;
@@ -9,38 +11,26 @@ export async function onRequestPost(context) {
   try {
     body = await request.json();
   } catch {
-    return new Response(JSON.stringify({ error: "请求格式错误" }), {
-      status: 400,
-      headers: { "content-type": "application/json" },
-    });
+    return json({ error: "请求格式错误" }, 400);
   }
 
   const message = String(body.message || "").trim().slice(0, 1000);
-  if (!message) {
-    return new Response(JSON.stringify({ error: "请填写反馈内容" }), {
-      status: 400,
-      headers: { "content-type": "application/json" },
-    });
+  if (!message) return json({ error: "请填写反馈内容" }, 400);
+
+  const ip = clientIp(request);
+  let uid;
+  if (kvEnabled()) {
+    const user = await verifySession(request.headers.get("x-auth-token"));
+    if (user) uid = user.uid;
+  }
+  const anonId = uid ? undefined : String(body.userId || "anon").slice(0, 64);
+  const contact = String(body.contact || "").slice(0, 100);
+
+  if (kvEnabled()) {
+    await recordFeedback({ uid, anonId, message, contact, page: String(body.page || ""), ip });
+  } else {
+    console.log(JSON.stringify({ t: "feedback", ts: new Date().toISOString(), anonId, uid: uid || null, contact: contact || null, ip, message }));
   }
 
-  const ip =
-    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    request.headers.get("x-real-ip") ||
-    "unknown";
-
-  console.log(
-    JSON.stringify({
-      t: "feedback",
-      ts: new Date().toISOString(),
-      userId: String(body.userId || "anon").slice(0, 64),
-      page: String(body.page || "").slice(0, 200),
-      contact: String(body.contact || "").slice(0, 100) || null,
-      ip,
-      message,
-    })
-  );
-
-  return new Response(JSON.stringify({ ok: true }), {
-    headers: { "content-type": "application/json" },
-  });
+  return json({ ok: true });
 }

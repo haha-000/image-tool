@@ -1,7 +1,9 @@
 /**
- * 运营事件采集 — EdgeOne Node Functions 移植版（node-functions/api/track.js → POST /api/track）
- * 事件以结构化 JSON 写入 EdgeOne 函数日志，控制台按 "track" 过滤即可统计。
+ * 运营事件采集 — EdgeOne Node Functions 版（POST /api/track）
+ * 登录用户（token → uid 主键）> 匿名设备 ID；KV 配置时落库（全局流 + 单用户轨迹），否则降级日志。
  */
+
+import { verifySession, recordEvent, kvEnabled } from "./_lib.js";
 
 const MAX_PROPS = 20;
 
@@ -21,7 +23,7 @@ export async function onRequestPost(context) {
     request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     request.headers.get("x-real-ip") ||
     "unknown";
-  const ua = (request.headers.get("user-agent") || "").slice(0, 200);
+  const ua = request.headers.get("user-agent") || "";
 
   const props = {};
   let i = 0;
@@ -32,17 +34,19 @@ export async function onRequestPost(context) {
     }
   }
 
-  console.log(
-    JSON.stringify({
-      t: "track",
-      ts: new Date().toISOString(),
-      event,
-      userId: String(body.userId || "anon").slice(0, 64),
-      ip,
-      ua,
-      ...props,
-    })
-  );
+  let uid, anonId;
+  if (kvEnabled()) {
+    const token = request.headers.get("x-auth-token") || String(body.token || "").slice(0, 64);
+    const user = await verifySession(token);
+    if (user) uid = user.uid;
+  }
+  if (!uid) anonId = String(body.userId || "anon").slice(0, 64);
+
+  if (uid || kvEnabled()) {
+    await recordEvent({ event, uid, anonId, ip, ua, props });
+  } else {
+    console.log(JSON.stringify({ t: "track", ts: new Date().toISOString(), event, anonId, ip, ua: ua.slice(0, 200), ...props }));
+  }
 
   return new Response(null, { status: 204 });
 }

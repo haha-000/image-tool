@@ -34,10 +34,16 @@ export interface TrackProps {
   [k: string]: string | number | boolean | undefined | null;
 }
 
-/** 上报一个运营事件（不抛错、不等待） */
+/** 上报一个运营事件（不抛错、不等待）；登录用户自动附带 token，服务端解析为 uid 主键 */
 export function track(event: string, props: TrackProps = {}): void {
   if (typeof window === "undefined") return;
-  const payload = JSON.stringify({ event, userId: getUserId(), props });
+  let payload: string;
+  try {
+    const token = localStorage.getItem("tuke-token-v1"); // 与 lib/auth.ts 的 TOKEN_KEY 一致
+    payload = JSON.stringify({ event, userId: getUserId(), token: token || undefined, props });
+  } catch {
+    return;
+  }
   try {
     fetch("/api/track", {
       method: "POST",
