@@ -11,6 +11,7 @@ import imageCompression from "browser-image-compression";
 import ToolShell from "@/components/ToolShell";
 import UploadZone from "@/components/UploadZone";
 import { downloadBlob, formatBytes, outputName } from "@/lib/image";
+import { track } from "@/lib/track";
 import { Download, Loader2, RotateCcw } from "lucide-react";
 
 interface CompressResult {
@@ -71,6 +72,11 @@ export default function CompressPage() {
         height: bitmap.height,
       });
       bitmap.close();
+      track("tool_used", {
+        tool: "compress",
+        kbIn: Math.round(file.size / 1024),
+        kbOut: Math.round(blob.size / 1024),
+      });
     } catch {
       setError("压缩失败，请换一张图片重试");
     } finally {
@@ -206,7 +212,10 @@ export default function CompressPage() {
               </div>
 
               <button
-                onClick={() => downloadBlob(result.blob, outputName("compressed", file.type.includes("png") ? "png" : file.type.includes("webp") ? "webp" : "jpg"))}
+                onClick={() => {
+                  track("download", { tool: "compress" });
+                  downloadBlob(result.blob, outputName("compressed", file.type.includes("png") ? "png" : file.type.includes("webp") ? "webp" : "jpg"));
+                }}
                 className="mt-6 flex items-center gap-2 rounded-lg bg-accent px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-strong"
               >
                 <Download className="size-4" />

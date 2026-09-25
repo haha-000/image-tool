@@ -7,9 +7,10 @@
  * MVP 阶段充值走"联系客服 + 后台改额度"，接支付后再替换占位逻辑。
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Coins, Crown, X } from "lucide-react";
 import { activateMember, grantCredits } from "@/lib/quota";
+import { track } from "@/lib/track";
 
 interface PaywallModalProps {
   open: boolean;
@@ -40,9 +41,15 @@ const PLANS = [
 export default function PaywallModal({ open, onClose, onFreeDownload }: PaywallModalProps) {
   const [paid, setPaid] = useState(false);
 
+  // 运营埋点：付费弹窗曝光（转化漏斗起点）与模拟充值行为
+  useEffect(() => {
+    if (open) track("paywall_open", { hadFreeDownload: Boolean(onFreeDownload) });
+  }, [open, onFreeDownload]);
+
   if (!open) return null;
 
   const handleChoose = (plan: (typeof PLANS)[number]) => {
+    track("recharge_sim", { plan: plan.id, price: plan.price });
     // MVP：模拟「客服确认到账 → 后台加额度」。正式接入支付后删除本段，改为拉起支付。
     plan.grant();
     setPaid(true);

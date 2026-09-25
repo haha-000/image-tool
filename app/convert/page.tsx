@@ -10,6 +10,7 @@ import Image from "next/image";
 import ToolShell from "@/components/ToolShell";
 import UploadZone from "@/components/UploadZone";
 import { canvasToBlob, downloadBlob, formatBytes, loadImage, outputName } from "@/lib/image";
+import { track } from "@/lib/track";
 import { Download, Loader2, RotateCcw } from "lucide-react";
 
 const TARGETS = [
@@ -93,6 +94,13 @@ export default function ConvertPage() {
       const qualityArg = target === "png" ? undefined : quality / 100;
       const blob = await canvasToBlob(canvas, targetCfg.mime, qualityArg);
       setResult({ blob, url: URL.createObjectURL(blob) });
+      track("tool_used", {
+        tool: "convert",
+        from: source.ext,
+        to: target,
+        kbIn: Math.round(source.file.size / 1024),
+        kbOut: Math.round(blob.size / 1024),
+      });
     } catch {
       setError("转换失败，请重试");
     } finally {
@@ -209,7 +217,10 @@ export default function ConvertPage() {
                   </p>
                 </div>
                 <button
-                  onClick={() => downloadBlob(result.blob, outputName("converted", target))}
+                  onClick={() => {
+                    track("download", { tool: "convert", to: target });
+                    downloadBlob(result.blob, outputName("converted", target));
+                  }}
                   className="flex items-center gap-2 rounded-lg bg-accent px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-strong"
                 >
                   <Download className="size-4" />

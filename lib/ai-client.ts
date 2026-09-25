@@ -1,13 +1,21 @@
 /**
  * 统一 AI API 调用模块（前端侧）
  * 所有 AI 能力都走本站 /api/ai/* 后端代理，浏览器里永远不出现 API Key。
- * 后续切换或增加备用 API 只需改服务端 app/api/ai/[action]/route.ts，前端零改动。
+ *
+ * 两段式任务流（适配佐糖异步任务，长任务不占 serverless 时长）：
+ *   1. POST /api/ai/{action} → 返回 { taskId }
+ *   2. 浏览器每 1.5s GET /api/ai/{action}?taskId= → { status: "processing" | "done" }
+ *   3. done 时拿 dataURL 结果（服务端已把 1 小时时效的 URL 转存为 base64）
+ *
+ * 切换或增加备用 API 只需改服务端 app/api/ai/[action]/route.ts，前端零改动。
  */
+
+import { getUserId } from "@/lib/track";
 
 export type AiAction = "watermark" | "matting";
 
 export interface AiResponse {
-  image: string; // 处理结果：dataURL 或 https URL
+  image: string; // 处理结果：dataURL
 }
 
 export class AiError extends Error {
@@ -18,25 +26,53 @@ export class AiError extends Error {
   }
 }
 
+const POLL_INTERVAL_MS = 1_500;
+const POLL_BUDGET_MS = 180_000; // 全屏去水印官方示例 53s，留足余量
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export async function requestAi(action: AiAction, body: FormData): Promise<AiResponse> {
-  const res = await fetch(`/api/ai/${action}`, {
-    method: "POST",
-    body,
-  });
+  const headers = { "x-user-id": getUserId() };
 
-  let data: { image?: string; error?: string } = {};
+  /* ── 1. 创建任务 ── */
+  const createRes = await fetch(`/api/ai/${action}`, { method: "POST", body, headers });
+  let createData: { taskId?: string; image?: string; error?: string } = {};
   try {
-    data = await res.json();
+    createData = await createRes.json();
   } catch {
-    // 上游返回了非 JSON 内容
+    /* 非 JSON 响应 */
+  }
+  if (!createRes.ok) {
+    throw new AiError(createData.error || "服务繁忙，请稍后再试", createRes.status);
+  }
+  // 兜底：后端直接返回结果（同步模式）
+  if (createData.image) return { image: createData.image };
+
+  const taskId = createData.taskId;
+  if (!taskId) throw new AiError("服务繁忙，请稍后再试", 502);
+
+  /* ── 2. 轮询结果 ── */
+  const deadline = Date.now() + POLL_BUDGET_MS;
+  while (Date.now() < deadline) {
+    await sleep(POLL_INTERVAL_MS);
+
+    let data: { status?: string; image?: string; error?: string } = {};
+    try {
+      const r = await fetch(`/api/ai/${action}?taskId=${encodeURIComponent(taskId)}`, {
+        headers,
+      });
+      data = await r.json();
+      if (!r.ok) {
+        throw new AiError(data.error || "服务繁忙，请稍后再试", r.status);
+      }
+    } catch (err) {
+      if (err instanceof AiError) throw err;
+      continue; // 单次网络抖动，继续下一轮
+    }
+
+    if (data.status === "done" && data.image) return { image: data.image };
+    // processing → 继续；error 已在上面 throw
   }
 
-  if (!res.ok) {
-    // 503 = 服务未配置；502/500 = 上游异常；429 = 触发风控
-    throw new AiError(data.error || "服务繁忙，请稍后再试", res.status);
-  }
-  if (!data.image) {
-    throw new AiError("服务繁忙，请稍后再试", 502);
-  }
-  return { image: data.image };
+  throw new AiError("处理超时，请稍后再试", 504);
 }

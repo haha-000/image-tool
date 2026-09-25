@@ -1,40 +1,31 @@
 "use client";
 
 /**
- * AI 去水印：上传 → Canvas 涂抹标记水印区域 → 提交后端代理 → 结果对比。
+ * AI 去水印（全屏自动识别版）：上传 → 一键处理 → 结果对比。
+ * 佐糖全屏去水印-高级 API 自动识别并清除水印/文字/Logo/印章，无需涂抹。
  * 额度逻辑：开始处理前检查（不足弹付费引导），处理成功才扣 1 次；失败不扣。
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import ToolShell from "@/components/ToolShell";
 import UploadZone from "@/components/UploadZone";
 import PaywallModal from "@/components/PaywallModal";
 import { requestAi, AiError } from "@/lib/ai-client";
 import { tryConsume, refundLast } from "@/lib/quota";
-import { downloadDataUrl, formatBytes, loadImage, outputName } from "@/lib/image";
-import { Download, Loader2, RotateCcw, Brush, Eraser } from "lucide-react";
-
-/** 涂抹笔触（原图坐标系） */
-type Stroke = Array<{ x: number; y: number }>;
+import { downloadDataUrl, formatBytes, outputName } from "@/lib/image";
+import { track } from "@/lib/track";
+import { Download, Loader2, RotateCcw, Sparkles } from "lucide-react";
 
 export default function WatermarkPage() {
-  // 原图状态
   const [file, setFile] = useState<File | null>(null);
   const [srcUrl, setSrcUrl] = useState<string>("");
-  const [srcSize, setSrcSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
   const objectUrlRef = useRef<string>("");
 
-  // 涂抹状态
-  const [strokes, setStrokes] = useState<Stroke[]>([]);
-  const [brushSize, setBrushSize] = useState(36);
-  const drawingRef = useRef(false);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  // 处理状态
   const [busy, setBusy] = useState(false);
-  const [stage, setStage] = useState(0); // 0 idle / 1 上传 / 2 AI 修复 / 3 生成
+  const [stage, setStage] = useState(0); // 0 idle / 1 上传 / 2 AI 识别清除 / 3 生成
   const [result, setResult] = useState<string | null>(null);
+  const [resultExt, setResultExt] = useState<"png" | "jpg">("png");
   const [error, setError] = useState<string | null>(null);
   const [paywall, setPaywall] = useState(false);
 
@@ -46,136 +37,43 @@ export default function WatermarkPage() {
   useEffect(() => {
     if (!busy) return setStage(0);
     const t1 = setTimeout(() => setStage(1), 0);
-    const t2 = setTimeout(() => setStage(2), 1600);
+    const t2 = setTimeout(() => setStage(2), 2500);
+    const t3 = setTimeout(() => setStage(3), 30_000);
     return () => {
       clearTimeout(t1);
       clearTimeout(t2);
+      clearTimeout(t3);
     };
   }, [busy]);
 
-  const STAGE_TEXT = ["准备中…", "正在上传图片…", "AI 正在修复涂抹区域…", "正在生成结果…"];
+  const STAGE_TEXT = [
+    "准备中…",
+    "正在上传图片…",
+    "AI 正在全屏识别并清除水印…",
+    "AI 处理较慢，请再等一会儿…",
+  ];
 
   const pick = (f: File) => {
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
     objectUrlRef.current = URL.createObjectURL(f);
     setFile(f);
     setSrcUrl(objectUrlRef.current);
-    setStrokes([]);
     setResult(null);
     setError(null);
-    loadImage(objectUrlRef.current).then((img) =>
-      setSrcSize({ w: img.naturalWidth, h: img.naturalHeight })
-    );
   };
 
   const reset = () => {
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
     setFile(null);
     setSrcUrl("");
-    setStrokes([]);
     setResult(null);
     setError(null);
   };
 
-  /* ── 涂抹绘制（显示层：红色半透明笔刷） ── */
-  const redraw = useCallback(
-    (all: Stroke[]) => {
-      const canvas = canvasRef.current;
-      if (!canvas || !srcSize.w) return;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.strokeStyle = "rgba(220, 60, 40, 0.55)";
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      ctx.lineWidth = brushSize;
-      for (const s of all) {
-        if (s.length < 2) {
-          if (s.length === 1) {
-            ctx.beginPath();
-            ctx.arc(s[0].x, s[0].y, brushSize / 2, 0, Math.PI * 2);
-            ctx.fillStyle = "rgba(220, 60, 40, 0.55)";
-            ctx.fill();
-          }
-          continue;
-        }
-        ctx.beginPath();
-        ctx.moveTo(s[0].x, s[0].y);
-        for (let i = 1; i < s.length; i++) ctx.lineTo(s[i].x, s[i].y);
-        ctx.stroke();
-      }
-    },
-    [brushSize, srcSize.w]
-  );
-
-  useEffect(() => {
-    redraw(strokes);
-  }, [strokes, redraw]);
-
-  /** 屏幕坐标 → 画布坐标（画布分辨率 = 原图尺寸，CSS 自适应缩放） */
-  const toCanvasPos = (e: React.PointerEvent): { x: number; y: number } => {
-    const canvas = canvasRef.current!;
-    const rect = canvas.getBoundingClientRect();
-    return {
-      x: ((e.clientX - rect.left) / rect.width) * canvas.width,
-      y: ((e.clientY - rect.top) / rect.height) * canvas.height,
-    };
-  };
-
-  const startDraw = (e: React.PointerEvent) => {
-    if (result) return; // 已出结果，禁止再涂
-    e.currentTarget.setPointerCapture(e.pointerId);
-    drawingRef.current = true;
-    setStrokes((prev) => [...prev, [toCanvasPos(e)]]);
-  };
-  const moveDraw = (e: React.PointerEvent) => {
-    if (!drawingRef.current) return;
-    const p = toCanvasPos(e);
-    setStrokes((prev) => {
-      const next = [...prev];
-      next[next.length - 1] = [...next[next.length - 1], p];
-      return next;
-    });
-  };
-  const endDraw = () => {
-    drawingRef.current = false;
-  };
-
-  /** 生成上游 inpaint 掩码：黑底白笔触 PNG */
-  const buildMask = (): Promise<Blob> => {
-    const canvas = document.createElement("canvas");
-    canvas.width = srcSize.w;
-    canvas.height = srcSize.h;
-    const ctx = canvas.getContext("2d")!;
-    ctx.fillStyle = "#000";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.strokeStyle = "#fff";
-    ctx.fillStyle = "#fff";
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.lineWidth = brushSize;
-    for (const s of strokes) {
-      if (s.length === 1) {
-        ctx.beginPath();
-        ctx.arc(s[0].x, s[0].y, brushSize / 2, 0, Math.PI * 2);
-        ctx.fill();
-        continue;
-      }
-      ctx.beginPath();
-      ctx.moveTo(s[0].x, s[0].y);
-      for (let i = 1; i < s.length; i++) ctx.lineTo(s[i].x, s[i].y);
-      ctx.stroke();
-    }
-    return new Promise((resolve, reject) =>
-      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("mask"))), "image/png")
-    );
-  };
-
   /* ── 提交 AI 处理 ── */
   const run = async () => {
-    if (!file || strokes.length === 0) return;
+    if (!file || busy) return;
 
-    // 额度检查：不足则弹付费引导，本次不消耗
     if (!tryConsume().ok) {
       setPaywall(true);
       return;
@@ -185,18 +83,20 @@ export default function WatermarkPage() {
     setError(null);
     setResult(null);
     try {
-      const mask = await buildMask();
       const form = new FormData();
       form.append("image", file);
-      form.append("mask", new File([mask], "mask.png", { type: "image/png" }));
-
       const res = await requestAi("watermark", form);
       setResult(res.image);
+      setResultExt(res.image.startsWith("data:image/jpeg") ? "jpg" : "png");
       setSplit(50);
+      track("ai_success", { tool: "watermark", kb: Math.round(file.size / 1024) });
     } catch (err) {
-      // 处理失败不扣额度：回退刚消耗的次数
-      refundLast();
+      refundLast(); // 处理失败不扣额度
       setError(err instanceof AiError ? err.message : "服务繁忙，请稍后再试");
+      track("ai_fail", {
+        tool: "watermark",
+        reason: err instanceof AiError ? err.message.slice(0, 100) : "unknown",
+      });
     } finally {
       setBusy(false);
     }
@@ -214,7 +114,7 @@ export default function WatermarkPage() {
   return (
     <ToolShell
       title="AI 去水印"
-      desc="上传图片后用笔刷涂抹水印区域，AI 自动修复画面。每天 3 次免费额度，处理失败不扣次数。"
+      desc="上传图片，AI 自动识别并清除水印、文字、Logo 与印章，智能填充修复画面。每天 3 次免费额度，处理失败不扣次数。"
       badge="ai"
     >
       {!file ? (
@@ -224,8 +124,8 @@ export default function WatermarkPage() {
         <div className="grid gap-5">
           <div className="overflow-hidden rounded-xl border border-line bg-surface">
             <div className="flex items-center justify-between border-b border-line px-4 py-2.5 text-sm">
-              <span className="font-medium">修复结果 · 左右拖动对比</span>
-              <span className="text-xs text-ink-3">左：原图 / 右：修复后</span>
+              <span className="font-medium">处理结果 · 左右拖动对比</span>
+              <span className="text-xs text-ink-3">左：原图 / 右：去水印后</span>
             </div>
             <div
               ref={compareRef}
@@ -240,9 +140,9 @@ export default function WatermarkPage() {
             >
               <Image
                 src={result}
-                alt="修复结果"
-                width={srcSize.w || 1200}
-                height={srcSize.h || 800}
+                alt="去水印结果"
+                width={1200}
+                height={800}
                 className="block h-auto w-full"
                 unoptimized
               />
@@ -253,8 +153,8 @@ export default function WatermarkPage() {
                 <Image
                   src={srcUrl}
                   alt="原图"
-                  width={srcSize.w || 1200}
-                  height={srcSize.h || 800}
+                  width={1200}
+                  height={800}
                   className="block h-auto w-full"
                   unoptimized
                 />
@@ -273,11 +173,14 @@ export default function WatermarkPage() {
 
           <div className="flex flex-wrap gap-3">
             <button
-              onClick={() => downloadDataUrl(result, outputName("watermark-removed", "png"))}
+              onClick={() => {
+                track("download", { tool: "watermark" });
+                downloadDataUrl(result, outputName("watermark-removed", resultExt));
+              }}
               className="flex items-center gap-2 rounded-lg bg-accent px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-strong"
             >
               <Download className="size-4" />
-              下载修复图
+              下载去水印图
             </button>
             <button
               onClick={reset}
@@ -289,81 +192,52 @@ export default function WatermarkPage() {
           </div>
         </div>
       ) : (
-        /* ── 涂抹编辑视图 ── */
+        /* ── 上传预览 + 一键处理 ── */
         <div className="grid gap-6">
           <div className="overflow-hidden rounded-xl border border-line bg-surface">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2.5 text-sm">
-              <span className="font-medium">涂抹水印区域</span>
-              <span className="tnum text-xs text-ink-3">
-                {srcSize.w} × {srcSize.h} · {formatBytes(file.size)}
-              </span>
+            <div className="flex items-center justify-between border-b border-line px-4 py-2.5 text-sm">
+              <span className="font-medium">原图</span>
+              <span className="text-xs text-ink-3">{formatBytes(file.size)}</span>
             </div>
-            <div className="relative bg-surface-2">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
+            <div className="flex max-h-80 items-center justify-center overflow-hidden bg-surface-2 p-4">
+              <Image
                 src={srcUrl}
-                alt="待处理图片"
-                className="block max-h-[26rem] w-full object-contain"
-                draggable={false}
-              />
-              <canvas
-                ref={canvasRef}
-                width={srcSize.w || 1}
-                height={srcSize.h || 1}
-                className="brush-canvas absolute inset-0 h-full w-full"
-                onPointerDown={startDraw}
-                onPointerMove={moveDraw}
-                onPointerUp={endDraw}
-                onPointerCancel={endDraw}
+                alt="原图预览"
+                width={800}
+                height={600}
+                className="h-auto max-h-64 w-auto max-w-full object-contain"
+                unoptimized
               />
             </div>
           </div>
 
           <div className="rounded-xl border border-line bg-surface p-5">
-            <div className="flex items-center justify-between">
-              <label className="flex items-center gap-2 text-sm font-medium">
-                <Brush className="size-4 text-ink-2" />
-                笔刷大小
-              </label>
-              <span className="tnum text-sm text-accent-strong">{brushSize}px</span>
-            </div>
-            <input
-              type="range"
-              min={12}
-              max={90}
-              value={brushSize}
-              onChange={(e) => setBrushSize(Number(e.target.value))}
-              className="mt-3 w-full accent-[#0e7a5f]"
-            />
-
-            <div className="mt-5 flex flex-wrap gap-3">
+            <div className="flex flex-wrap gap-3">
               <button
                 onClick={run}
-                disabled={busy || strokes.length === 0}
-                className="flex items-center gap-2 rounded-lg bg-accent px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-strong disabled:cursor-not-allowed disabled:opacity-40"
+                disabled={busy}
+                className="flex items-center gap-2 rounded-lg bg-accent px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-strong disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {busy ? <Loader2 className="size-4 animate-spin" /> : null}
-                {busy ? STAGE_TEXT[stage] : "开始 AI 修复（消耗 1 次额度）"}
-              </button>
-              <button
-                onClick={() => setStrokes([])}
-                disabled={strokes.length === 0 || busy}
-                className="flex items-center gap-1.5 rounded-lg border border-line-strong px-4 py-2.5 text-sm transition-colors hover:border-accent hover:text-accent-strong disabled:opacity-40"
-              >
-                <Eraser className="size-4" />
-                清除涂抹
+                {busy ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Sparkles className="size-4" />
+                )}
+                {busy ? STAGE_TEXT[stage] : "一键 AI 去水印（消耗 1 次额度）"}
               </button>
               <button
                 onClick={reset}
-                className="flex items-center gap-1.5 rounded-lg border border-line-strong px-4 py-2.5 text-sm transition-colors hover:border-accent hover:text-accent-strong"
+                disabled={busy}
+                className="flex items-center gap-1.5 rounded-lg border border-line-strong px-4 py-2.5 text-sm transition-colors hover:border-accent hover:text-accent-strong disabled:opacity-40"
               >
                 <RotateCcw className="size-4" />
                 换图
               </button>
             </div>
-
-            {strokes.length === 0 && !busy && (
-              <p className="mt-3 text-xs text-ink-3">在图片上按住拖动，把水印涂成红色再开始修复</p>
+            {!busy && (
+              <p className="mt-3 text-xs text-ink-3">
+                AI 自动识别全图中的水印、文字、Logo 和印章，无需手动涂抹；复杂图片处理约需 20–60 秒
+              </p>
             )}
             {error && <p className="mt-3 text-sm text-danger">{error}</p>}
           </div>

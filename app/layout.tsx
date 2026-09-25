@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Analytics } from "@vercel/analytics/next";
 import "./globals.css";
 import { QuotaProvider } from "@/components/QuotaProvider";
 import Navbar from "@/components/Navbar";
@@ -32,6 +33,7 @@ export default function RootLayout({
           </footer>
           <FeedbackWidget />
         </QuotaProvider>
+        <Analytics />
       </body>
     </html>
   );

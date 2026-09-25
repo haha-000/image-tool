@@ -13,6 +13,7 @@ import PaywallModal from "@/components/PaywallModal";
 import { requestAi, AiError } from "@/lib/ai-client";
 import { tryConsume, refundLast } from "@/lib/quota";
 import { downloadDataUrl, formatBytes, outputName } from "@/lib/image";
+import { track } from "@/lib/track";
 import { Download, Loader2, RotateCcw } from "lucide-react";
 
 export default function MattingPage() {
@@ -72,9 +73,14 @@ export default function MattingPage() {
       form.append("image", file);
       const res = await requestAi("matting", form);
       setResult(res.image);
+      track("ai_success", { tool: "matting", kb: Math.round(file.size / 1024) });
     } catch (err) {
       refundLast(); // 失败不扣额度
       setError(err instanceof AiError ? err.message : "服务繁忙，请稍后再试");
+      track("ai_fail", {
+        tool: "matting",
+        reason: err instanceof AiError ? err.message.slice(0, 100) : "unknown",
+      });
     } finally {
       setBusy(false);
     }
@@ -108,7 +114,10 @@ export default function MattingPage() {
           </div>
           <div className="flex flex-wrap gap-3">
             <button
-              onClick={() => downloadDataUrl(result, outputName("matted", "png"))}
+              onClick={() => {
+                track("download", { tool: "matting" });
+                downloadDataUrl(result, outputName("matted", "png"));
+              }}
               className="flex items-center gap-2 rounded-lg bg-accent px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-strong"
             >
               <Download className="size-4" />

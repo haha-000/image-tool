@@ -1,24 +1,23 @@
 /**
- * AI 能力统一后端代理（watermark / matting）— 佐糖 PicWish 适配版
+ * AI 能力统一后端代理（watermark / matting）— 佐糖 PicWish 适配版 · 两段式任务架构
  *
  * 上游规格（佐糖官方 API 文档）：
  *   鉴权     X-API-KEY 请求头
- *   去水印   POST /api/tasks/visual/inpaint       （mask_file：白色 = 移除区域）
- *   抠图     POST /api/tasks/visual/segmentation  （输出透明 PNG）
- *   任务模式 异步：创建拿 task_id → 每 ~1.2s 轮询 → state=1 完成
- *   结果     data.image（return_type=2 时为 base64；URL 仅 1 小时有效）
+ *   去水印   POST /api/tasks/visual/advanced/watermark-remove（全屏去水印-高级：AI 自动识别，无需涂抹）
+ *   抠图     POST /api/tasks/visual/segmentation（输出透明 PNG）
+ *   任务模式 异步：创建拿 task_id → 轮询 GET {path}/{task_id} → state=1 完成
  *
- * 三个工程决策：
- * 1. 异步任务而非 sync=1 —— 官方推荐方式，高并发下成功率更高，超时完全可控；
- * 2. return_type=2 优先拿 base64 —— 佐糖结果 URL 只有 1 小时有效期，
- *    base64 转成 dataURL 后前端永久可用（用户隔天下载也不失效）；
- * 3. 前端统一字段（image / mask）在本层映射为佐糖字段（image_file / mask_file），
- *    前端永远不感知服务商细节 —— 以后换供应商只改这一个文件。
+ * 为什么是两段式（创建 + 前端轮询）而不是单个函数等到出结果：
+ *   全屏去水印官方示例耗时 53s+，单次 serverless 函数 60s 上限随时会被打穿；
+ *   拆开后每次函数调用只做一次短上游请求，长任务在浏览器侧轮询，永不超时。
  *
- * 安全设计：
- * 1. API Key 只存在于服务端环境变量，浏览器永远拿不到；
- * 2. 单 IP 每日限流防刷（内存级，serverless 多实例下是近似值，生产建议 Upstash Redis）；
- * 3. 上游异常统一降级为「服务繁忙」，不向客户端透出内部细节，详细信息只进服务端日志。
+ * 运营日志：所有任务创建/成功/失败都以结构化 JSON 写入服务端日志，
+ *   在 Vercel 控制台可按 "ai_task" 过滤直接统计任务量与失败率（见 OPERATIONS.md）。
+ *
+ * 安全设计（不变）：
+ *   1. API Key 只存在于服务端环境变量；
+ *   2. 创建接口单 IP 每日限流防刷；
+ *   3. 上游异常统一降级话术，细节只进服务端日志。
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -29,19 +28,16 @@ export const maxDuration = 60;
 const ALLOWED_ACTIONS = new Set(["watermark", "matting"]);
 
 /** 佐糖任务端点（创建与轮询同路径，轮询在尾部追加 /{task_id}） */
-const TASKS: Record<string, { createPath: string }> = {
-  watermark: { createPath: "/api/tasks/visual/inpaint" },
-  matting: { createPath: "/api/tasks/visual/segmentation" },
+const TASKS: Record<string, { createPath: string; label: string }> = {
+  watermark: { createPath: "/api/tasks/visual/advanced/watermark-remove", label: "去水印" },
+  matting: { createPath: "/api/tasks/visual/segmentation", label: "抠图" },
 };
 
-/* ── 超时预算 ── */
 const CREATE_TIMEOUT_MS = 30_000; // 创建任务（含图片上传）
-const POLL_INTERVAL_MS = 1_200; // 轮询间隔（官方建议 1s，略放宽）
-const POLL_BUDGET_MS = 42_000; // 轮询总预算（官方上限 inpaint 30s / segmentation 60s）
-const POLL_REQ_TIMEOUT_MS = 10_000; // 单次轮询请求超时
-const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 佐糖上限 20MB / 4096×4096
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 佐糖上限 50MB，站点收紧到 20MB
+const RESULT_FETCH_TIMEOUT_MS = 20_000; // 下载上游结果 URL
 
-/* ── 单 IP 每日限流 ── */
+/* ── 单 IP 每日限流（仅创建接口计数） ── */
 const IP_DAILY_LIMIT = 50;
 const ipHits = new Map<string, { date: string; count: number }>();
 
@@ -56,14 +52,24 @@ function rateLimited(ip: string): boolean {
   return rec.count > IP_DAILY_LIMIT;
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+function clientIp(req: NextRequest): string {
+  return (
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    req.headers.get("x-real-ip") ||
+    "unknown"
+  );
+}
 
-/** 上游结果字段 → 前端可用的图片地址（dataURL 或 https URL） */
-function normalizeImage(field: string): string {
-  if (field.startsWith("data:")) return field;
-  if (/^https?:\/\//.test(field)) return field; // 兜底：上游忽略 return_type 时返回 URL
-  // 裸 base64：按魔数嗅探真实 MIME（佐糖 inpaint 返回 JPEG、segmentation 返回 PNG，
-  // 标错 MIME 会导致下载文件扩展名与内容不符）
+/** 结构化运营日志：Vercel 控制台按 "ai_task" / "ai_task_fail" 过滤即可统计 */
+function opsLog(
+  event: string,
+  fields: Record<string, string | number | undefined | null>
+) {
+  console.log(JSON.stringify({ t: event, ts: new Date().toISOString(), ...fields }));
+}
+
+/** 裸 base64 → dataURL（按魔数嗅探真实 MIME，避免下载扩展名与内容不符） */
+function base64ToDataUrl(field: string): string {
   const mime = field.startsWith("iVBOR")
     ? "image/png"
     : field.startsWith("/9j/")
@@ -76,8 +82,23 @@ function normalizeImage(field: string): string {
   return `data:${mime};base64,${field}`;
 }
 
+/** 上游结果 → 前端可直接展示/下载的 dataURL。URL 结果在服务端转存 base64（佐糖 URL 仅 1 小时有效） */
+async function toDataUrl(field: string): Promise<string> {
+  if (field.startsWith("data:")) return field;
+  if (/^https?:\/\//.test(field)) {
+    const r = await fetch(field, { signal: AbortSignal.timeout(RESULT_FETCH_TIMEOUT_MS) });
+    if (!r.ok) throw new Error(`result fetch failed: HTTP ${r.status}`);
+    const buf = Buffer.from(await r.arrayBuffer());
+    const mime = r.headers.get("content-type")?.split(";")[0] || "image/png";
+    return `data:${mime};base64,${buf.toString("base64")}`;
+  }
+  return base64ToDataUrl(field);
+}
+
 const busy = (msg = "服务繁忙，请稍后再试") =>
   NextResponse.json({ error: msg }, { status: 502 });
+
+/* ═══════════ 第一段：创建任务（POST） ═══════════ */
 
 export async function POST(
   req: NextRequest,
@@ -89,16 +110,11 @@ export async function POST(
     return NextResponse.json({ error: "不支持的操作" }, { status: 404 });
   }
 
-  /* ── 简易防刷 ── */
-  const ip =
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    req.headers.get("x-real-ip") ||
-    "unknown";
+  const ip = clientIp(req);
   if (rateLimited(ip)) {
     return NextResponse.json({ error: "今日调用次数过多，请明天再来" }, { status: 429 });
   }
 
-  /* ── 配置检查 ── */
   const apiKey = process.env.AI_API_KEY;
   const apiBase = (process.env.AI_API_BASE || "https://techsz.aoscdn.com").replace(
     /\/$/,
@@ -107,9 +123,7 @@ export async function POST(
   if (!apiKey) {
     return NextResponse.json({ error: "AI 服务暂未开通，请稍后再试" }, { status: 503 });
   }
-  const authHeaders = { "X-API-KEY": apiKey };
 
-  /* ── 接收前端表单 ── */
   let form: FormData;
   try {
     form = await req.formData();
@@ -118,7 +132,6 @@ export async function POST(
   }
 
   const image = form.get("image");
-  const mask = form.get("mask");
   if (!(image instanceof File) || image.size === 0) {
     return NextResponse.json({ error: "缺少图片" }, { status: 400 });
   }
@@ -129,27 +142,24 @@ export async function POST(
     );
   }
 
-  /* ── 映射为佐糖字段 ── */
+  const userId = req.headers.get("x-user-id") || "anon";
+
+  /* 映射为佐糖字段：去水印走全屏自动识别（无 mask），抠图要透明 PNG */
   const upstream = new FormData();
   upstream.append("image_file", image, image.name || "image.png");
-  if (mask instanceof File && mask.size > 0) {
-    upstream.append("mask_file", mask, "mask.png"); // 黑底白区 = 要移除的区域
-  }
   upstream.append("sync", "0"); // 异步任务模式
-  upstream.append("return_type", "2"); // 结果用 base64 返回（URL 仅 1 小时有效）
   if (action === "matting") {
+    upstream.append("return_type", "2"); // base64 返回（URL 仅 1 小时有效）
     upstream.append("format", "png"); // 透明背景
-    upstream.append("output_type", "2"); // 只要结果图，不要蒙版
+    upstream.append("output_type", "2"); // 只要结果图
     upstream.append("crop", "0"); // 保持原始尺寸
   }
 
-  /* ── 1. 创建任务 ── */
   const createPath = TASKS[action].createPath;
-  let taskId: string | undefined;
   try {
     const res = await fetch(`${apiBase}${createPath}`, {
       method: "POST",
-      headers: authHeaders,
+      headers: { "X-API-KEY": apiKey },
       body: upstream,
       signal: AbortSignal.timeout(CREATE_TIMEOUT_MS),
     });
@@ -159,8 +169,9 @@ export async function POST(
       | null;
 
     if (!res.ok) {
-      console.error(`[ai/${action}] create failed: HTTP ${res.status} ${json?.message ?? ""}`);
-      // 401/403 = Key 无效或未开通，与未配置 Key 同一话术，方便用户识别配置问题
+      console.error(
+        `[ai/${action}] create failed: HTTP ${res.status} ${json?.message ?? ""}`
+      );
       if (res.status === 401 || res.status === 403) {
         return NextResponse.json(
           { error: "AI 服务暂未开通，请稍后再试" },
@@ -169,49 +180,106 @@ export async function POST(
       }
       return busy();
     }
-    taskId = json?.data?.task_id;
+    const taskId = json?.data?.task_id;
     if (!taskId) {
       console.error(`[ai/${action}] create ok but no task_id: ${JSON.stringify(json)}`);
       return busy();
     }
+
+    opsLog("ai_task_create", { action, userId, ip, taskId });
+    return NextResponse.json({ taskId });
   } catch (err) {
     console.error(`[ai/${action}] create error:`, err instanceof Error ? err.message : err);
     return busy();
   }
+}
 
-  /* ── 2. 轮询结果 ── */
-  const deadline = Date.now() + POLL_BUDGET_MS;
-  while (Date.now() < deadline) {
-    await sleep(POLL_INTERVAL_MS);
+/* ═══════════ 第二段：轮询任务（GET ?taskId=） ═══════════ */
 
-    let poll: {
-      data?: { state?: number; image?: string; file?: string };
-      message?: string;
-    } | null;
-    try {
-      const r = await fetch(`${apiBase}${createPath}/${taskId}`, {
-        headers: authHeaders,
-        signal: AbortSignal.timeout(POLL_REQ_TIMEOUT_MS),
-      });
-      poll = (await r.json().catch(() => null)) as typeof poll;
-    } catch {
-      continue; // 单次网络抖动不致命，继续下一轮
-    }
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ action: string }> }
+) {
+  const { action } = await params;
 
-    const state = poll?.data?.state;
-    const imageField = poll?.data?.image || poll?.data?.file;
-
-    if (state === 1 && imageField) {
-      return NextResponse.json({ image: normalizeImage(imageField) });
-    }
-    if (typeof state === "number" && state < 0) {
-      console.error(`[ai/${action}] task ${taskId} failed: state=${state} ${poll?.message ?? ""}`);
-      // -7 = 无效图片；其余为上游处理失败。前端已有失败退款逻辑，统一降级话术。
-      return busy(state === -7 ? "图片无法识别，请更换图片后重试" : undefined);
-    }
-    // state > 1（或未返回）= 处理中，继续轮询
+  if (!ALLOWED_ACTIONS.has(action)) {
+    return NextResponse.json({ error: "不支持的操作" }, { status: 404 });
   }
 
-  console.error(`[ai/${action}] task ${taskId} polling timeout`);
-  return NextResponse.json({ error: "处理超时，请稍后再试" }, { status: 504 });
+  const apiKey = process.env.AI_API_KEY;
+  const apiBase = (process.env.AI_API_BASE || "https://techsz.aoscdn.com").replace(
+    /\/$/,
+    ""
+  );
+  if (!apiKey) {
+    return NextResponse.json({ error: "AI 服务暂未开通，请稍后再试" }, { status: 503 });
+  }
+
+  const taskId = req.nextUrl.searchParams.get("taskId");
+  if (!taskId) {
+    return NextResponse.json({ error: "缺少 taskId" }, { status: 400 });
+  }
+  const userId = req.headers.get("x-user-id") || "anon";
+
+  const pollPath = `${TASKS[action].createPath}/${taskId}`;
+  let poll: {
+    data?: {
+      state?: number;
+      image?: string;
+      file?: string;
+      image_url?: string;
+      progress?: number;
+      use_point?: number;
+      time_elapsed?: number;
+    };
+    message?: string;
+  } | null;
+
+  try {
+    const r = await fetch(`${apiBase}${pollPath}`, {
+      headers: { "X-API-KEY": apiKey },
+      signal: AbortSignal.timeout(10_000),
+    });
+    poll = (await r.json().catch(() => null)) as typeof poll;
+    if (!r.ok) {
+      console.error(`[ai/${action}] poll failed: HTTP ${r.status} ${poll?.message ?? ""}`);
+      return busy();
+    }
+  } catch (err) {
+    // 单次网络抖动不致命：让前端继续下一轮
+    return NextResponse.json({ status: "processing" });
+  }
+
+  const state = poll?.data?.state;
+  const imageField = poll?.data?.image_url || poll?.data?.image || poll?.data?.file;
+
+  if (state === 1 && imageField) {
+    try {
+      const image = await toDataUrl(imageField);
+      opsLog("ai_task_done", {
+        action,
+        userId,
+        taskId,
+        usePoint: poll?.data?.use_point,
+        secs: poll?.data?.time_elapsed,
+      });
+      return NextResponse.json({ status: "done", image });
+    } catch (err) {
+      console.error(`[ai/${action}] result download failed:`, err);
+      return busy();
+    }
+  }
+
+  if (typeof state === "number" && state < 0) {
+    opsLog("ai_task_fail", { action, userId, taskId, state, msg: poll?.message });
+    // -7 = 无效图片；-14 = 内容不符合要求；其余为上游处理失败
+    const msg =
+      state === -7 || state === -14
+        ? "图片无法识别，请更换图片后重试"
+        : undefined;
+    return busy(msg);
+  }
+
+  // state 0 / >1 = 排队或处理中
+  return NextResponse.json({ status: "processing", progress: poll?.data?.progress ?? 0 });
 }

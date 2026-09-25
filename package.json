@@ -9,6 +9,7 @@
     "verify:key": "node scripts/verify-key.mjs"
   },
   "dependencies": {
+    "@vercel/analytics": "^2.0.1",
     "browser-image-compression": "^2.0.2",
     "lucide-react": "^0.475.0",
     "next": "^15.3.0",
